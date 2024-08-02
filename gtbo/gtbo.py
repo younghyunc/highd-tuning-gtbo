@@ -98,6 +98,9 @@ class GTBO:
                 f"Dimensionality must be at least 6 but is {self.benchmark.dim}. This is due to the binning strategy and rounding issues."
             )
 
+        self.fout_samples = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-samples.csv", "w")
+        self.fout_groups = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-groups.csv", "w")
+
         now = datetime.now()
         gin_config_str = gin.operative_config_str()
         adler = zlib.adler32(gin_config_str.encode("utf-8"))
@@ -209,6 +212,11 @@ class GTBO:
         )
         self._n_evals = gt_x.shape[0]
 
+        self.fout_groups.write(str(self._n_evals))
+        for i in range(len(active_dims)):
+            self.fout_groups.write(","+str(active_dims[i]))
+        self.fout_groups.write("\n")
+
         bo_time_start = time.time()
 
         target_dim = self.benchmark.dim
@@ -258,6 +266,12 @@ class GTBO:
         )
         self._n_evals += x_init.shape[0]
         x = torch.cat((x, x_init), dim=0)
+
+        items_computed = []
+        for i in range(len(fx)):
+            items_computed.append(fx[i].item())
+            #self.fout.write(str(i+1)+","+str(fx.min().item()) + "," + str(fx[i].item()) + "\n")
+            self.fout_samples.write(str(i+1)+","+str(np.array(items_computed).min()) + "," + str(fx[i].item()) + "\n")
 
         # NOTE THAT AT THIS POINT gt_x is in original scale whereas x is in [0,1]
 
@@ -318,6 +332,7 @@ class GTBO:
                 logging.info(
                     f"{BColors.OKBLUE}({self._n_evals}){BColors.ENDC} -> New best not found: {y_next:.3f}, best is {fx.min():.3f}, noiseless best: {fx_noiseless.min():.5f}"
                 )
+            self.fout_samples.write(str(len(fx))+","+str(fx.min().item()) + "," + str(y_next.item()) + "\n")
 
             x = torch.cat((x, x_next))
             fx = torch.cat((fx, y_next.reshape(-1)))
