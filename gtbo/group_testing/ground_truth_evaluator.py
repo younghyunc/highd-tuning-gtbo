@@ -51,9 +51,16 @@ class GroundTruthEvaluator:
         self.device = device
 
         # Estimate default
+        rets = []
+        for _ in range(n_default_samples):
+            ret_ = benchmark(self.default)
+            if type(ret_) is tuple:
+                rets.append(ret_)
+            else: # this is the case when the objective function returns one value
+                rets.append((ret_, ret_))
         default_values_noisy_noiseless: List[
             Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
-        ] = [benchmark(self.default) for _ in range(n_default_samples)]
+        ] = rets #[benchmark(self.default) for _ in range(n_default_samples)]
         if not benchmark.returns_noiseless:
             default_values_noisy_noiseless = [
                 (dvn, dvn) for dvn in default_values_noisy_noiseless
@@ -101,9 +108,18 @@ class GroundTruthEvaluator:
                 0, 2, (directions[j].shape[0],)
             ).to(dtype=torch.double)
         direction_configs = from_unit_cube(downscaled_direction_configs, lbs, ubs)
-        direction_values_noisy_noiseless = torch.tensor(
-            [self.benchmark(config) for config in direction_configs]
-        )
+        rets = []
+        for config in direction_configs:
+            ret_ = benchmark(config)
+            if type(ret_) is tuple: # this is the case when the objective function returns one value
+                rets.append(ret_)
+            else:
+                rets.append((ret_, ret_))
+        direction_values_noisy_noiseless = torch.tensor(rets)
+        #direction_values_noisy_noiseless = torch.tensor(
+        #    [self.benchmark(config) for config in direction_configs]
+        #)
+        #print ("direction_values_noisy_noiseless: ", direction_values_noisy_noiseless)
         if benchmark.returns_noiseless:
             direction_values = direction_values_noisy_noiseless[:, 0]
             direction_values_noiseless = direction_values_noisy_noiseless[:, 1]
@@ -184,7 +200,15 @@ class GroundTruthEvaluator:
             dtype=self.dtype,
         )
 
-        y_new_noisy_noiseless = self.benchmark(new_configuration)
+        print ("new_configuration: ", new_configuration)
+        ret_ = self.benchmark(new_configuration)
+        if type(ret_) is tuple: # this is the case when the objective function returns one value
+            y_new_noisy_noiseless = ret_
+        else:
+            y_new_noisy_noiseless = (ret_, ret_)
+        #y_new_noisy_noiseless = self.benchmark(new_configuration)
+
+        print ("y_new_noisy_noiseless: ", y_new_noisy_noiseless)
 
         if self.benchmark.returns_noiseless:
             y_new, y_new_noiseless = y_new_noisy_noiseless

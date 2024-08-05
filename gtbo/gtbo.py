@@ -98,8 +98,10 @@ class GTBO:
                 f"Dimensionality must be at least 6 but is {self.benchmark.dim}. This is due to the binning strategy and rounding issues."
             )
 
-        self.fout_samples = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-samples.csv", "w")
-        self.fout_groups = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-groups.csv", "w")
+        #self.fout_samples = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-samples.csv", "w")
+        #self.fout_groups = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-groups.csv", "w")
+        self.fout_samples = open ("results/samples.csv", "w")
+        self.fout_groups = open ("results/groups.csv", "w")
 
         now = datetime.now()
         gin_config_str = gin.operative_config_str()
@@ -130,6 +132,7 @@ class GTBO:
             benchmark_default = (
                 self.benchmark.ub_vec - self.benchmark.lb_vec
             ) / 2 + self.benchmark.lb_vec
+        print ("benchmark_default: ", benchmark_default)
 
         ### GT PHASE ###
 
@@ -254,7 +257,21 @@ class GTBO:
             ub=self.benchmark.ub_vec,
         )
 
-        fx_init_noisy_noiseless = self.benchmark(x_init_up)
+        rets_0 = []
+        rets_1 = []
+        for x_ in x_init_up:
+            ret_ = self.benchmark(x_)
+            if type(ret_) is tuple:
+                rets_0.append(ret_[0].item())
+                rets_1.append(ret_[1].item())
+            else: # this is the case when the objective function returns one value
+                rets_0.append(ret_.item())
+                rets_1.append(ret_.item())
+        rets_0 = torch.Tensor(rets_0).to(self.dtype) #, dtype=self.dtype)
+        rets_1 = torch.Tensor(rets_1).to(self.dtype) #, dtype=self.dtype)
+        rets = (rets_0, rets_1)
+        fx_init_noisy_noiseless = rets
+        #fx_init_noisy_noiseless = self.benchmark(x_init_up)
         if self.benchmark.returns_noiseless:
             fx_init, fx_init_noiseless = fx_init_noisy_noiseless
         else:
@@ -316,7 +333,21 @@ class GTBO:
                 self.benchmark.ub_vec,
             )
 
-            y_next_noisy_noiseless = self.benchmark(x_next_up)
+            rets_0 = []
+            rets_1 = []
+            for x_ in x_next_up:
+                ret_ = self.benchmark(x_)
+                if type(ret_) is tuple:
+                    rets_0.append(ret_[0].item())
+                    rets_1.append(ret_[1].item())
+                else: # this is the case when the objective function returns one value
+                    rets_0.append(ret_.item())
+                    rets_1.append(ret_.item())
+            rets_0 = torch.Tensor(rets_0).to(self.dtype)
+            rets_1 = torch.Tensor(rets_1).to(self.dtype)
+            rets = (rets_0, rets_1)
+            y_next_noisy_noiseless = rets
+            #y_next_noisy_noiseless = self.benchmark(x_next_up)
             if self.benchmark.returns_noiseless:
                 y_next, y_next_noiseless = y_next_noisy_noiseless
             else:
