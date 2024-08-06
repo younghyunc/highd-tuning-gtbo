@@ -115,6 +115,9 @@ class GTBO:
         with open(os.path.join(self.results_dir, "gin_config.txt"), "w") as f:
             f.write(gin.operative_config_str())
 
+        self.active_dims = None
+        self.remove_first_samples = None
+
     def run(self) -> None:
         """
         Run the GTBO algorithm. This consists of two phases: the group testing phase and the Bayesian optimization phase.
@@ -196,11 +199,11 @@ class GTBO:
         gt_fx_noiseless = group_tester.fx_noiseless
 
         n_active = np.sum(marginals_np > group_tester.activeness_threshold)
-        active_dims = np.where(marginals_np > group_tester.activeness_threshold)[0]
+        self.active_dims = np.where(marginals_np > group_tester.activeness_threshold)[0]
 
         gt_subset_indices = None
         _, gt_subset_indices = np.unique(
-            np.sign((gt_x - benchmark_default)[:, active_dims]),
+            np.sign((gt_x - benchmark_default)[:, self.active_dims]),
             axis=0,
             return_index=True,
         )
@@ -216,9 +219,11 @@ class GTBO:
         self._n_evals = gt_x.shape[0]
 
         self.fout_groups.write(str(self._n_evals))
-        for i in range(len(active_dims)):
-            self.fout_groups.write(","+str(active_dims[i]))
+        for i in range(len(self.active_dims)):
+            self.fout_groups.write(","+str(self.active_dims[i]))
         self.fout_groups.write("\n")
+
+        print ("self.active_dims: ", self.active_dims)
 
         bo_time_start = time.time()
 
@@ -239,7 +244,7 @@ class GTBO:
         )
         fx = gt_fx.clone().detach().cpu()
         fx_noiseless = gt_fx_noiseless.clone().detach().cpu()
-        remove_first_samples = ground_truth_evaluator.n_default_samples
+        self.remove_first_samples = ground_truth_evaluator.n_default_samples
 
         n_init_samples = min(
             max(self.maximum_number_evaluations - x.shape[0], 1),
@@ -317,8 +322,8 @@ class GTBO:
                 x=x,
                 fx=fx,
                 device=self.device,
-                remove_first_samples=remove_first_samples,
-                active_dimensions=active_dims,
+                remove_first_samples=self.remove_first_samples,
+                active_dimensions=self.active_dims,
                 model_hyperparameters=model_hyperparameters,
                 prev_mll=prev_mll,
             )
@@ -428,3 +433,111 @@ class GTBO:
         test_times["bo_time"] = bo_time_end - bo_time_start
         with open(os.path.join(self.results_dir, "test_times.json"), "w") as f:
             json.dump(test_times, f)
+
+    def run_with_history(self, history_x, history_fx, max_samples):
+
+        x = torch.Tensor(history_x).to(self.dtype)
+        fx = torch.Tensor(history_fx).to(self.dtype) #, dtype=self.dtype)
+        fx_noiseless = fx
+
+        self.maximum_number_evaluations = max_samples
+
+        hyperparameters = torch.empty(0)
+        # model_hyperparameters is the gp statedict that we use to reinitialize the gp with the same hps
+        model_hyperparameters = None
+        prev_mll = None
+        while self._n_evals <= self.maximum_number_evaluations:
+
+            if self._n_evals % self.retrain_gp_from_scratch_every == 0:
+                model_hyperparameters = None
+
+            bo_iter_start_time = time.time()
+            # TODO hp_summary and model_hyperparameters contain the same data so we only need one of them
+            (
+                x_best,
+                loss,
+                hp_summary,
+                model_hyperparameters,
+                gp_fit_time,
+                acq_opt_time,
+                prev_mll,
+            ) = create_candidates(
+                x=x,
+                fx=fx,
+                device=self.device,
+                remove_first_samples=self.remove_first_samples,
+                active_dimensions=self.active_dims,
+                model_hyperparameters=model_hyperparameters,
+                prev_mll=prev_mll,
+            )
+
+            logging.debug(f"GP fitting took {gp_fit_time:.3f}s")
+
+            hyperparameters = torch.cat((hyperparameters, hp_summary.to(device="cpu")))
+            x_next = x_best[loss.argmin()].detach().cpu().reshape(1, -1)
+            x_next_up = from_unit_cube(
+                x_next,
+                self.benchmark.lb_vec,
+                self.benchmark.ub_vec,
+            )
+
+            rets_0 = []
+            rets_1 = []
+            for x_ in x_next_up:
+                ret_ = self.benchmark(x_)
+                if type(ret_) is tuple:
+                    rets_0.append(ret_[0].item())
+                    rets_1.append(ret_[1].item())
+                else: # this is the case when the objective function returns one value
+                    rets_0.append(ret_.item())
+                    rets_1.append(ret_.item())
+            rets_0 = torch.Tensor(rets_0).to(self.dtype)
+            rets_1 = torch.Tensor(rets_1).to(self.dtype)
+            rets = (rets_0, rets_1)
+            y_next_noisy_noiseless = rets
+            #y_next_noisy_noiseless = self.benchmark(x_next_up)
+            if self.benchmark.returns_noiseless:
+                y_next, y_next_noiseless = y_next_noisy_noiseless
+            else:
+                y_next, y_next_noiseless = torch.clone(
+                    y_next_noisy_noiseless
+                ), torch.clone(y_next_noisy_noiseless)
+            y_next = y_next.squeeze()
+            if y_next < fx.min():
+                logging.info(
+                    f"{BColors.OKBLUE}({self._n_evals}){BColors.ENDC} -> {BColors.BOLD}New best found: {BColors.OKGREEN}{y_next:.3f}{BColors.ENDC}"
+                )
+            else:
+                logging.info(
+                    f"{BColors.OKBLUE}({self._n_evals}){BColors.ENDC} -> New best not found: {y_next:.3f}, best is {fx.min():.3f}, noiseless best: {fx_noiseless.min():.5f}"
+                )
+            self.fout_samples.write(str(len(fx))+","+str(fx.min().item()) + "," + str(y_next.item()) + "\n")
+
+            x = torch.cat((x, x_next))
+            fx = torch.cat((fx, y_next.reshape(-1)))
+            fx_noiseless = torch.cat((fx_noiseless, y_next_noiseless.reshape(-1)))
+
+            self._n_evals += 1
+
+        return x, fx
+
+    def train_gtbo_model(self, history_x, history_fx):
+
+        print ("active_dims: ", self.active_dims)
+        print ("remove_first_samples: ", self.remove_first_samples)
+
+        #if self.active_dims == None: # or self.remove_first_samples == None:
+        #    print ("not able to model. GTBO needs initial evaluations")
+        #    return None
+
+        get_gp_kwargs = dict(
+            active_dimensions=self.active_dims,
+            remove_first_samples=self.remove_first_samples,
+        )
+
+        x = torch.Tensor(history_x).to(self.dtype)
+        fx = torch.Tensor(history_fx).to(self.dtype) #, dtype=self.dtype)
+
+        model, train_x, _ = get_gp(x=x, fx=fx, **get_gp_kwargs)
+
+        return model
