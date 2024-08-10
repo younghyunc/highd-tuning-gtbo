@@ -43,8 +43,6 @@ class GTBO:
     def __init__(
         self,
         benchmark: Benchmark,
-        maximum_number_evaluations: int,
-        number_initial_points: int,
         results_dir: str,
         device="cpu",
         dtype: str = "float64",
@@ -70,9 +68,9 @@ class GTBO:
         """The device to use"""
         self.logging_level = logging_level
         """The logging level"""
-        self.maximum_number_evaluations = maximum_number_evaluations
+        self.maximum_number_evaluations = 100
         """The maximum number of evaluations"""
-        self.number_initial_points = number_initial_points
+        self.number_initial_points = 50
         """The number of initial points to sample"""
         self.retrain_gp_from_scratch_every = retrain_gp_from_scratch_every
         """The number of iterations after which to retrain the GP from scratch"""
@@ -100,8 +98,9 @@ class GTBO:
 
         #self.fout_samples = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-samples.csv", "w")
         #self.fout_groups = open ("results/"+self.benchmark.get_benchmark_name()+"-"+str(self.benchmark.get_expid())+"-groups.csv", "w")
-        self.fout_samples = open ("results/samples.csv", "w")
-        self.fout_groups = open ("results/groups.csv", "w")
+        os.system("mkdir -p " + results_dir)
+        self.fout_samples = open (results_dir+"/samples.csv", "w")
+        self.fout_groups = open (results_dir+"/groups.csv", "w")
 
         now = datetime.now()
         gin_config_str = gin.operative_config_str()
@@ -118,7 +117,10 @@ class GTBO:
         self.active_dims = None
         self.remove_first_samples = None
 
-    def run(self) -> None:
+    def run(self, max_samples = 100, num_initial_samples = 50) -> None:
+        self.maximum_number_evaluations = max_samples
+        self.number_initial_points = num_initial_samples
+
         """
         Run the GTBO algorithm. This consists of two phases: the group testing phase and the Bayesian optimization phase.
         In the group testing phase, we identify the active dimensions of the problem.
@@ -433,6 +435,187 @@ class GTBO:
         test_times["bo_time"] = bo_time_end - bo_time_start
         with open(os.path.join(self.results_dir, "test_times.json"), "w") as f:
             json.dump(test_times, f)
+
+    def run_initial(self, num_initial_samples=50) -> None:
+        """
+        Run the GTBO algorithm. This consists of two phases: the group testing phase and the Bayesian optimization phase.
+        In the group testing phase, we identify the active dimensions of the problem.
+        In the Bayesian optimization phase, we optimize the objective function using the identified active dimensions
+        by placing a shorter lengthscale on them.
+
+        Returns:
+            None.
+
+        """
+        try:
+            benchmark_default = self.benchmark.default
+        except:
+            benchmark_default = (
+                self.benchmark.ub_vec - self.benchmark.lb_vec
+            ) / 2 + self.benchmark.lb_vec
+        print ("benchmark_default: ", benchmark_default)
+
+        ### GT PHASE ###
+
+        # Run the ground truth phase if we are not continuing from a previous run and we are not running BO only
+        ground_truth_evaluator = GroundTruthEvaluator(
+            benchmark=self.benchmark,
+            default=benchmark_default,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        signal_std = torch.sqrt(
+            ground_truth_evaluator.f_std**2
+            + ground_truth_evaluator.pure_noise_std**2
+        ).item()
+        noise_std = ground_truth_evaluator.noise_std.item()
+        if noise_std < 1e-6:
+            noise_std = 1e-6
+
+        group_tester = GroupTester(
+            evaluator=ground_truth_evaluator,
+            noise_std=noise_std,
+            signal_std=signal_std,
+            device=self.device,
+            dtype=self.dtype,
+            results_dir=self.results_dir,
+        )
+
+        with lzma.open(os.path.join(self.results_dir, "sigma_signal.txt.xz"), "w") as f:
+            f.write(str(group_tester.signal_std).encode("utf-8"))
+        with lzma.open(os.path.join(self.results_dir, "sigma_noise.txt.xz"), "w") as f:
+            f.write(str(group_tester.noise_std).encode("utf-8"))
+        with lzma.open(
+            os.path.join(self.results_dir, "sigma_pure_noise.txt.xz"), "w"
+        ) as f:
+            f.write(str(ground_truth_evaluator.pure_noise_std).encode("utf-8"))
+
+        state = group_tester.optimize()
+
+        test_times = dict(
+            tester_optimize_time=group_tester.optimize_time,
+            tester_gamma_time=group_tester.gamma_time,
+            tester_entropy_time=group_tester.entropy_time,
+            tester_conditional_entropy_time=group_tester.conditional_entropy_time,
+            tester_eval_time=group_tester.eval_time,
+            tester_produce_sample_time=group_tester.produce_sample_time,
+            tester_update_time=group_tester.resample_time,
+            tester_resample_time=group_tester.sampler.resample_time,
+            tester_move_time=group_tester.sampler.move_time,
+            tester_resample_move_time=group_tester.sampler.resample_move_time,
+            tester_sample_times=group_tester.sample_times,
+            bo_times=[],
+            gp_fit_times=[],
+            acq_opt_times=[],
+        )
+        marginals_np = state.marginals[0].cpu().numpy()
+
+        # those are unnormalized
+        gt_x = group_tester.x
+        gt_fx = group_tester.fx
+        gt_fx_noiseless = group_tester.fx_noiseless
+
+        n_active = np.sum(marginals_np > group_tester.activeness_threshold)
+        self.active_dims = np.where(marginals_np > group_tester.activeness_threshold)[0]
+
+        gt_subset_indices = None
+        _, gt_subset_indices = np.unique(
+            np.sign((gt_x - benchmark_default)[:, self.active_dims]),
+            axis=0,
+            return_index=True,
+        )
+
+        if gt_subset_indices is not None:
+            gt_x = gt_x[gt_subset_indices]
+            gt_fx = gt_fx[gt_subset_indices]
+            gt_fx_noiseless = gt_fx_noiseless[gt_subset_indices]
+
+        logging.info(
+            f"{BColors.BOLD}Active dimensions: {n_active}/{self.benchmark.dim}{BColors.ENDC}"
+        )
+        self._n_evals = gt_x.shape[0]
+
+        self.fout_groups.write(str(self._n_evals))
+        for i in range(len(self.active_dims)):
+            self.fout_groups.write(","+str(self.active_dims[i]))
+        self.fout_groups.write("\n")
+
+        print ("self.active_dims: ", self.active_dims)
+
+        bo_time_start = time.time()
+
+        target_dim = self.benchmark.dim
+
+        #### SETUP FOR BO ####
+
+        # reuse GT samples
+        x = (
+            to_unit_cube(
+                gt_x,
+                lb=self.benchmark.lb_vec,
+                ub=self.benchmark.ub_vec,
+            )
+            .clone()
+            .detach()
+            .cpu()
+        )
+        fx = gt_fx.clone().detach().cpu()
+        fx_noiseless = gt_fx_noiseless.clone().detach().cpu()
+        self.remove_first_samples = ground_truth_evaluator.n_default_samples
+
+        n_init_samples = num_initial_samples
+        x_init = (
+            SobolEngine(target_dim, scramble=True)
+            .draw(n_init_samples)
+            .to(dtype=self.dtype)
+        )
+
+        x_init_up = from_unit_cube(
+            x=x_init,
+            lb=self.benchmark.lb_vec,
+            ub=self.benchmark.ub_vec,
+        )
+
+        rets_0 = []
+        rets_1 = []
+        for x_ in x_init_up:
+            ret_ = self.benchmark(x_)
+            if type(ret_) is tuple:
+                rets_0.append(ret_[0].item())
+                rets_1.append(ret_[1].item())
+            else: # this is the case when the objective function returns one value
+                rets_0.append(ret_.item())
+                rets_1.append(ret_.item())
+        rets_0 = torch.Tensor(rets_0).to(self.dtype) #, dtype=self.dtype)
+        rets_1 = torch.Tensor(rets_1).to(self.dtype) #, dtype=self.dtype)
+        rets = (rets_0, rets_1)
+        fx_init_noisy_noiseless = rets
+        #fx_init_noisy_noiseless = self.benchmark(x_init_up)
+        if self.benchmark.returns_noiseless:
+            fx_init, fx_init_noiseless = fx_init_noisy_noiseless
+        else:
+            fx_init = torch.clone(fx_init_noisy_noiseless)
+            fx_init_noiseless = torch.clone(fx_init_noisy_noiseless)
+        fx = torch.cat((fx, fx_init.clone().detach().cpu().reshape(-1)))
+        fx_noiseless = torch.cat(
+            (fx_noiseless, fx_init_noiseless.clone().detach().cpu().reshape(-1))
+        )
+        self._n_evals += x_init.shape[0]
+        x = torch.cat((x, x_init), dim=0)
+
+        items_computed = []
+        for i in range(len(fx)):
+            items_computed.append(fx[i].item())
+            #self.fout.write(str(i+1)+","+str(fx.min().item()) + "," + str(fx[i].item()) + "\n")
+            self.fout_samples.write(str(i+1)+","+str(np.array(items_computed).min()) + "," + str(fx[i].item()) + "\n")
+
+        # NOTE THAT AT THIS POINT gt_x is in original scale whereas x is in [0,1]
+
+        if x.shape[0] == 0:
+            warnings.warn("No initial points were sampled.")
+
+        return x, fx
 
     def run_with_history(self, history_x, history_fx, max_samples):
 
