@@ -53,7 +53,7 @@ class GroundTruthEvaluator:
         # Estimate default
         rets = []
         for _ in range(n_default_samples):
-            ret_ = benchmark(self.default)
+            ret_ = benchmark(np.array(self.default))
             if type(ret_) is tuple:
                 rets.append(ret_)
             else: # this is the case when the objective function returns one value
@@ -110,7 +110,7 @@ class GroundTruthEvaluator:
         direction_configs = from_unit_cube(downscaled_direction_configs, lbs, ubs)
         rets = []
         for config in direction_configs:
-            ret_ = benchmark(config)
+            ret_ = benchmark(np.array(config))
             if type(ret_) is tuple: # this is the case when the objective function returns one value
                 rets.append(ret_)
             else:
@@ -200,15 +200,16 @@ class GroundTruthEvaluator:
             dtype=self.dtype,
         )
 
-        print ("new_configuration: ", new_configuration)
-        ret_ = self.benchmark(new_configuration)
+        #print ("new_configuration: ", new_configuration)
+        ret_ = self.benchmark(np.array(new_configuration))
+        if (torch.is_tensor(ret_) == False):
+            ret_ = torch.tensor(ret_)
         if type(ret_) is tuple: # this is the case when the objective function returns one value
             y_new_noisy_noiseless = ret_
         else:
             y_new_noisy_noiseless = (ret_, ret_)
         #y_new_noisy_noiseless = self.benchmark(new_configuration)
-
-        print ("y_new_noisy_noiseless: ", y_new_noisy_noiseless)
+        #print ("y_new_noisy_noiseless: ", y_new_noisy_noiseless)
 
         if self.benchmark.returns_noiseless:
             y_new, y_new_noiseless = y_new_noisy_noiseless

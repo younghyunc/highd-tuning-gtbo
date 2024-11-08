@@ -580,7 +580,7 @@ class GTBO:
         rets_0 = []
         rets_1 = []
         for x_ in x_init_up:
-            ret_ = self.benchmark(x_)
+            ret_ = self.benchmark(np.array(x_))
             if type(ret_) is tuple:
                 rets_0.append(ret_[0].item())
                 rets_1.append(ret_[1].item())
@@ -667,7 +667,7 @@ class GTBO:
             rets_0 = []
             rets_1 = []
             for x_ in x_next_up:
-                ret_ = self.benchmark(x_)
+                ret_ = self.benchmark(np.array(x_))
                 if type(ret_) is tuple:
                     rets_0.append(ret_[0].item())
                     rets_1.append(ret_[1].item())
